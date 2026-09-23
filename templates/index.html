@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="mr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>टोमॅटो रोग निदान</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: 'Noto Sans Devanagari', Arial, sans-serif;
+    background: #f2f7f2;
+    margin: 0;
+    padding: 16px;
+    color: #1a1a1a;
+  }
+  .container { max-width: 480px; margin: 0 auto; }
+  h1 {
+    font-size: 22px;
+    text-align: center;
+    color: #2e7d32;
+    margin-bottom: 4px;
+  }
+  .subtitle {
+    text-align: center;
+    color: #555;
+    font-size: 14px;
+    margin-bottom: 20px;
+  }
+  .upload-box {
+    background: white;
+    border: 2px dashed #4caf50;
+    border-radius: 12px;
+    padding: 24px;
+    text-align: center;
+    margin-bottom: 16px;
+  }
+  input[type="file"] { display: none; }
+  .capture-btn {
+    background: #2e7d32;
+    color: white;
+    padding: 14px 24px;
+    border: none;
+    border-radius: 8px;
+    font-size: 16px;
+    cursor: pointer;
+    width: 100%;
+    margin-bottom: 10px;
+  }
+  .capture-btn:active { background: #1b5e20; }
+  #preview {
+    max-width: 100%;
+    border-radius: 8px;
+    margin-top: 12px;
+    display: none;
+  }
+  .submit-btn {
+    background: #f57c00;
+    color: white;
+    padding: 14px 24px;
+    border: none;
+    border-radius: 8px;
+    font-size: 16px;
+    cursor: pointer;
+    width: 100%;
+    display: none;
+  }
+  .result-card {
+    background: white;
+    border-radius: 12px;
+    padding: 20px;
+    margin-top: 20px;
+    display: none;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+  }
+  .result-card img { width: 100%; border-radius: 8px; margin-bottom: 12px; }
+  .label { font-weight: bold; color: #2e7d32; }
+  .marathi-text {
+    font-size: 17px;
+    line-height: 1.6;
+    background: #f1f8e9;
+    padding: 12px;
+    border-radius: 8px;
+    margin: 12px 0;
+  }
+  audio { width: 100%; margin-top: 8px; }
+  .loading {
+    text-align: center;
+    padding: 20px;
+    display: none;
+    color: #555;
+  }
+  .spinner {
+    border: 4px solid #eee;
+    border-top: 4px solid #2e7d32;
+    border-radius: 50%;
+    width: 32px;
+    height: 32px;
+    animation: spin 1s linear infinite;
+    margin: 0 auto 10px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>🍅 टोमॅटो रोग निदान</h1>
+  <p class="subtitle">पानांचा फोटो काढा आणि लगेच निदान मिळवा</p>
+
+  <div class="upload-box">
+    <button class="capture-btn" onclick="document.getElementById('fileInput').click()">
+      📷 फोटो काढा / निवडा
+    </button>
+    <input type="file" id="fileInput" accept="image/*" capture="environment">
+    <img id="preview" alt="preview">
+    <button class="submit-btn" id="submitBtn" onclick="submitPhoto()">
+      निदान करा (Diagnose)
+    </button>
+  </div>
+
+  <div class="loading" id="loading">
+    <div class="spinner"></div>
+    <p>तपासत आहे... (Analyzing...)</p>
+  </div>
+
+  <div class="result-card" id="resultCard">
+    <img id="heatmapImg" alt="heatmap">
+    <p><span class="label">निदान (Diagnosis):</span> <span id="predictedClass"></span></p>
+    <p><span class="label">विश्वासार्हता (Confidence):</span> <span id="confidence"></span>%</p>
+    <div class="marathi-text" id="marathiText"></div>
+    <audio id="audioPlayer" controls></audio>
+  </div>
+</div>
+
+<script>
+let selectedFile = null;
+
+document.getElementById('fileInput').addEventListener('change', function(e) {
+  selectedFile = e.target.files[0];
+  if (selectedFile) {
+    const preview = document.getElementById('preview');
+    preview.src = URL.createObjectURL(selectedFile);
+    preview.style.display = 'block';
+    document.getElementById('submitBtn').style.display = 'block';
+  }
+});
+
+async function submitPhoto() {
+  if (!selectedFile) return;
+
+  document.getElementById('loading').style.display = 'block';
+  document.getElementById('resultCard').style.display = 'none';
+
+  const formData = new FormData();
+  formData.append('photo', selectedFile);
+
+  try {
+    const response = await fetch('/diagnose', {
+      method: 'POST',
+      body: formData
+    });
+    const data = await response.json();
+
+    document.getElementById('loading').style.display = 'none';
+
+    if (data.error) {
+      alert('Error: ' + data.error);
+      return;
+    }
+
+    if (data.not_a_leaf) {
+      document.getElementById('marathiText').textContent = data.marathi_message;
+      document.getElementById('heatmapImg').style.display = 'none';
+      document.getElementById('predictedClass').textContent = '—';
+      document.getElementById('confidence').textContent = data.confidence;
+      document.getElementById('audioPlayer').style.display = 'none';
+      document.getElementById('resultCard').style.display = 'block';
+      return;
+    }
+
+    document.getElementById('heatmapImg').style.display = 'block';
+    document.getElementById('audioPlayer').style.display = 'block';
+    document.getElementById('heatmapImg').src = data.heatmap_url;
+    document.getElementById('predictedClass').textContent = data.predicted_class;
+    document.getElementById('confidence').textContent = data.confidence;
+    document.getElementById('marathiText').textContent = data.marathi_message;
+    document.getElementById('audioPlayer').src = data.audio_url;
+    document.getElementById('resultCard').style.display = 'block';
+  } catch (err) {
+    document.getElementById('loading').style.display = 'none';
+    alert('Something went wrong: ' + err.message);
+  }
+}
+</script>
+</body>
+</html>

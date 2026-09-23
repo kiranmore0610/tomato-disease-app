@@ -1,0 +1,7 @@
+flask==3.0.3
+gunicorn==22.0.0
+tensorflow-cpu==2.17.0
+opencv-python-headless==4.10.0.84
+matplotlib==3.9.2
+gtts==2.5.3
+numpy==1.26.4
