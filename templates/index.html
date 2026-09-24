@@ -83,6 +83,12 @@
     margin: 12px 0;
   }
   audio { width: 100%; margin-top: 8px; }
+  .no-audio-note {
+    font-size: 13px;
+    color: #888;
+    font-style: italic;
+    margin-top: 8px;
+  }
   .loading {
     text-align: center;
     padding: 20px;
@@ -128,6 +134,9 @@
     <p><span class="label">विश्वासार्हता (Confidence):</span> <span id="confidence"></span>%</p>
     <div class="marathi-text" id="marathiText"></div>
     <audio id="audioPlayer" controls></audio>
+    <p class="no-audio-note" id="noAudioNote" style="display:none;">
+      🔇 आवाज उपलब्ध नाही (audio unavailable right now) — मजकूर वरील आहे.
+    </p>
   </div>
 </div>
 
@@ -173,17 +182,29 @@ async function submitPhoto() {
       document.getElementById('predictedClass').textContent = '—';
       document.getElementById('confidence').textContent = data.confidence;
       document.getElementById('audioPlayer').style.display = 'none';
+      document.getElementById('noAudioNote').style.display = 'none';
       document.getElementById('resultCard').style.display = 'block';
       return;
     }
 
     document.getElementById('heatmapImg').style.display = 'block';
-    document.getElementById('audioPlayer').style.display = 'block';
     document.getElementById('heatmapImg').src = data.heatmap_url;
     document.getElementById('predictedClass').textContent = data.predicted_class;
     document.getElementById('confidence').textContent = data.confidence;
     document.getElementById('marathiText').textContent = data.marathi_message;
-    document.getElementById('audioPlayer').src = data.audio_url;
+
+    // audio_url may be null if TTS generation timed out (e.g. slow/
+    // blocked on the hosting server) — show the player only when we
+    // actually have an audio file, otherwise show a small note instead.
+    if (data.audio_url) {
+      document.getElementById('audioPlayer').style.display = 'block';
+      document.getElementById('audioPlayer').src = data.audio_url;
+      document.getElementById('noAudioNote').style.display = 'none';
+    } else {
+      document.getElementById('audioPlayer').style.display = 'none';
+      document.getElementById('noAudioNote').style.display = 'block';
+    }
+
     document.getElementById('resultCard').style.display = 'block';
   } catch (err) {
     document.getElementById('loading').style.display = 'none';
