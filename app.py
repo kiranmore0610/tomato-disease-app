@@ -1,223 +1,161 @@
 """
-Flask Web App — Tomato Disease Diagnosis for Farmers
-=======================================================
-A farmer opens this page on their phone browser, takes/uploads a photo of
-a tomato leaf, and instantly gets:
-  - The predicted disease (or healthy)
-  - A Grad-CAM heatmap showing what the AI focused on
-  - A Marathi text explanation
-  - A Marathi audio file they can tap to listen to
+Farmer Communication Module — Marathi Text + Audio Output
+============================================================
+Takes the diagnosis result (from gradcam_explainability.py) and converts
+it into simple Marathi text, plus an optional spoken audio file — so a
+farmer with low literacy can still understand the result.
 
 Install dependencies:
-    pip install flask tensorflow opencv-python matplotlib gTTS --break-system-packages
+    pip install gTTS --break-system-packages
 
-Run locally:
-    python app.py
-Then open http://localhost:5000 in a browser (or http://<your-PC-IP>:5000
-from a phone on the same WiFi network to test before real deployment).
+Note: gTTS (Google Text-to-Speech) requires an internet connection to
+generate audio. If you're offline, it will just skip audio and print
+the Marathi text instead.
 """
 
+from gtts import gTTS
 import os
-import uuid
-import numpy as np
-import tensorflow as tf
-import cv2
-import matplotlib
-import matplotlib.cm as cm
-from flask import Flask, request, render_template, jsonify, send_from_directory
-
-from marathi_communication import build_marathi_message, speak_marathi
+import concurrent.futures
 
 # ----------------------------------------------------------------------
-# CONFIGURATION
+# MARATHI TRANSLATIONS — pre-written by disease class (not machine
+# translated) so the wording is accurate, natural, and farmer-friendly.
+# Edit/improve these with a native speaker's review before your
+# conclave presentation.
 # ----------------------------------------------------------------------
-MODEL_PATH = "tomato_disease_model.h5"
-IMG_SIZE = (224, 224)
-UPLOAD_FOLDER = "static/uploads"
-RESULT_FOLDER = "static/results"
-
-CLASS_NAMES = [
-    "Bacterial_spot", "Early_blight", "Late_blight", "Leaf_Mold",
-    "Septoria_leaf_spot", "Spider_mites Two-spotted_spider_mite",
-    "Target_Spot", "Tomato_Yellow_Leaf_Curl_Virus", "Tomato_mosaic_virus",
-    "healthy", "powdery_mildew",
-]
-
-YIELD_LOSS_TABLE = {
-    "Bacterial_spot": (10, 50), "Early_blight": (20, 50), "Late_blight": (30, 70),
-    "Leaf_Mold": (10, 50), "Septoria_leaf_spot": (20, 60),
-    "Spider_mites Two-spotted_spider_mite": (10, 30), "Target_Spot": (20, 40),
-    "Tomato_Yellow_Leaf_Curl_Virus": (30, 90), "Tomato_mosaic_virus": (10, 30),
-    "healthy": (0, 0), "powdery_mildew": (10, 30),
+DISEASE_NAME_MARATHI = {
+    "Bacterial_spot": "जिवाणूजन्य ठिपके रोग (बॅक्टेरियल स्पॉट)",
+    "Early_blight": "लवकर येणारा करपा रोग (अर्ली ब्लाइट)",
+    "Late_blight": "उशिरा येणारा करपा रोग (लेट ब्लाइट)",
+    "Leaf_Mold": "पानावरील बुरशी रोग (लीफ मोल्ड)",
+    "Septoria_leaf_spot": "सेप्टोरिया पानांवरील ठिपके रोग",
+    "Spider_mites Two-spotted_spider_mite": "कोळी किडीचा प्रादुर्भाव (स्पायडर माइट)",
+    "Target_Spot": "लक्ष्य ठिपके रोग (टार्गेट स्पॉट)",
+    "Tomato_Yellow_Leaf_Curl_Virus": "पिवळा पर्णगुच्छ विषाणू रोग",
+    "Tomato_mosaic_virus": "मोझॅक विषाणू रोग",
+    "healthy": "झाड निरोगी आहे",
+    "powdery_mildew": "भुरी रोग (पावडरी मिल्ड्यू)",
 }
 
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(RESULT_FOLDER, exist_ok=True)
-
-app = Flask(__name__)
-
-# ----------------------------------------------------------------------
-# LOAD MODEL ONCE AT STARTUP (not per-request — much faster)
-# ----------------------------------------------------------------------
-print("Loading model...")
-model = tf.keras.models.load_model(MODEL_PATH)
-
-
-def find_last_conv_layer(model):
-    base = model.get_layer(index=1)
-    for layer in reversed(base.layers):
-        if isinstance(layer, tf.keras.layers.Conv2D) or "conv" in layer.name.lower():
-            return base, layer.name
-    raise ValueError("Could not find a convolutional layer for Grad-CAM.")
-
-
-BASE_MODEL, LAST_CONV_LAYER_NAME = find_last_conv_layer(model)
-print(f"Model loaded. Using layer for Grad-CAM: {LAST_CONV_LAYER_NAME}")
-
+RECOMMENDATION_MARATHI = {
+    "Bacterial_spot": "तांबेयुक्त बुरशीनाशक (कॉपर ऑक्सिक्लोराईड, २.५ ग्रॅम प्रति लिटर पाणी) फवारणी करा. वरून पाणी देणे टाळा, कारण त्यामुळे रोग पसरतो.",
+    "Early_blight": "मॅन्कोझेब ७५% डब्ल्यूपी (०.२५%) फवारणी करा आणि खालची जुनी, संक्रमित पाने काढून टाका.",
+    "Late_blight": "हा रोग वेगाने पसरतो. कॉपर ऑक्सिक्लोराईड (२.५ ग्रॅम प्रति लिटर) प्रतिबंधात्मक फवारणी करा; तीव्र प्रादुर्भाव असल्यास मेटालॅक्सिल + मॅन्कोझेब वापरा आणि कृषी तज्ञांचा सल्ला घ्या.",
+    "Leaf_Mold": "झाडांमधील अंतर वाढवून हवा खेळती ठेवा आणि क्लोरोथॅलोनिल किंवा मॅन्कोझेब फवारणी करा.",
+    "Septoria_leaf_spot": "मॅन्कोझेब ७५% डब्ल्यूपी (०.२५%) फवारणी करा, संक्रमित पाने काढून टाका आणि ३-४ वर्षांनी पीक फेरपालट करा.",
+    "Spider_mites Two-spotted_spider_mite": "कडुलिंब तेल किंवा योग्य माइटनाशक (मिटिसाइड) फवारणी करा. सामान्य बुरशीनाशकाने कोळी किडे नियंत्रित होत नाहीत.",
+    "Target_Spot": "मॅन्कोझेब किंवा क्लोरोथॅलोनिल फवारणी करा आणि पीक फेरपालट करा.",
+    "Tomato_Yellow_Leaf_Curl_Virus": "यावर थेट औषध नाही. पांढरी माशी (व्हाईटफ्लाय) नियंत्रित करणे हाच उपाय आहे. इमिडाक्लोप्रिड सारखे कीटकनाशक वापरा आणि संक्रमित झाडे उपटून नष्ट करा.",
+    "Tomato_mosaic_virus": "यावर उपचार नाही. संक्रमित झाडे त्वरित उपटून नष्ट करा आणि हात व अवजारे साबणाने स्वच्छ करा, कारण स्पर्शाने रोग पसरतो.",
+    "healthy": "तुमचे पीक निरोगी आहे. काळजीपूर्वक निरीक्षण सुरू ठेवा.",
+    "powdery_mildew": "गंधकयुक्त (सल्फर) बुरशीनाशक फवारणी करा.",
+}
 
 # ----------------------------------------------------------------------
-# GRAD-CAM CORE (same logic as gradcam_explainability.py)
+# IMPORTANT SAFETY NOTE — read before using in a real deployment
 # ----------------------------------------------------------------------
-def make_gradcam_heatmap(img_array):
-    grad_model = tf.keras.models.Model(
-        inputs=BASE_MODEL.input,
-        outputs=[BASE_MODEL.get_layer(LAST_CONV_LAYER_NAME).output, BASE_MODEL.output],
-    )
-    with tf.GradientTape() as tape:
-        conv_outputs, base_output = grad_model(img_array)
-        x = model.get_layer(index=2)(base_output)
-        x = model.get_layer(index=4)(x)
-        preds = model.get_layer(index=6)(x)
-        pred_index = tf.argmax(preds[0])
-        class_channel = preds[:, pred_index]
-
-    grads = tape.gradient(class_channel, conv_outputs)
-    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-    conv_outputs = conv_outputs[0]
-    heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
-    heatmap = tf.squeeze(heatmap)
-    heatmap = tf.maximum(heatmap, 0) / (tf.math.reduce_max(heatmap) + 1e-8)
-
-    return heatmap.numpy(), int(pred_index), preds.numpy()[0]
-
-
-def overlay_gradcam(img_path, heatmap, save_path, alpha=0.4):
-    img = cv2.imread(img_path)
-    img = cv2.resize(img, IMG_SIZE)
-    heatmap = cv2.resize(heatmap, (img.shape[1], img.shape[0]))
-    heatmap = np.uint8(255 * heatmap)
-
-    try:
-        jet = matplotlib.colormaps["jet"]
-    except AttributeError:
-        jet = cm.get_cmap("jet")
-
-    jet_colors = jet(np.arange(256))[:, :3]
-    jet_heatmap = np.uint8(jet_colors[heatmap] * 255)
-    jet_heatmap = cv2.cvtColor(jet_heatmap, cv2.COLOR_RGB2BGR)
-
-    superimposed = cv2.addWeighted(img, 1 - alpha, jet_heatmap, alpha, 0)
-    cv2.imwrite(save_path, superimposed)
-
-
-# ----------------------------------------------------------------------
-# ROUTES
-# ----------------------------------------------------------------------
-@app.route("/")
-def index():
-    return render_template("index.html")
-
-
-CONFIDENCE_THRESHOLD = 0.60  # below this, treat as "uncertain / not a valid leaf photo"
-GREEN_PIXEL_THRESHOLD = 0.15  # at least 15% of the image should be plant-green
-
-NOT_A_LEAF_MESSAGE_MARATHI = (
-    "हा फोटो टोमॅटोच्या पानाचा दिसत नाही. कृपया एका पानाचा स्पष्ट, जवळून फोटो "
-    "काढा आणि पुन्हा प्रयत्न करा."
+# These recommendations are based on published ICAR and agricultural
+# research literature, using ACTIVE INGREDIENT names (not brand names),
+# since exact branded products, availability, and legal registration
+# vary by Indian state. Before this reaches real farmers:
+#   1. Have a licensed agronomist or your guide review every entry.
+#   2. Exact dosages can vary by local pest resistance, weather, and
+#      crop stage — these are general starting points, not prescriptions.
+#   3. Always tell farmers to confirm with their local Krishi Vigyan
+#      Kendra (KVK) or agricultural extension officer before purchase,
+#      and to follow the product label exactly (safety gear, re-entry
+#      interval, pre-harvest interval).
+#   4. Some products/dosages require specific certification to
+#      recommend commercially in India — this is general educational
+#      guidance, not a substitute for professional agronomic advice.
+DISCLAIMER_MARATHI = (
+    "सूचना: ही शिफारस सर्वसाधारण मार्गदर्शनासाठी आहे. फवारणीपूर्वी कृपया "
+    "आपल्या जवळच्या कृषी विज्ञान केंद्र (KVK) किंवा कृषी अधिकाऱ्यांचा सल्ला "
+    "अवश्य घ्या आणि औषधाच्या लेबलवरील सूचनांचे पालन करा."
 )
 
 
-def looks_like_a_leaf(img_path):
-    """Quick color-based check: does this image contain enough green/plant
-    coloring to plausibly be a leaf? Runs before the AI model, so it's fast
-    and catches obviously wrong photos (faces, walls, random objects)."""
-    img = cv2.imread(img_path)
-    if img is None:
-        return False
+def build_marathi_message(predicted_class, confidence, yield_loss_range):
+    disease_mr = DISEASE_NAME_MARATHI.get(predicted_class, predicted_class)
+    recommendation_mr = RECOMMENDATION_MARATHI.get(predicted_class, "")
+    confidence_pct = int(confidence * 100)
+    loss_low, loss_high = yield_loss_range
 
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    # Green/yellow-green hue range covers healthy leaves AND many disease
-    # discolorations (yellowing, browning still has some green remaining
-    # in a real leaf photo's background/other leaves).
-    lower_green = np.array([25, 30, 30])
-    upper_green = np.array([95, 255, 255])
-    mask = cv2.inRange(hsv, lower_green, upper_green)
-    green_ratio = np.count_nonzero(mask) / mask.size
+    if predicted_class == "healthy":
+        message = (
+            f"निदान: {disease_mr}. "
+            f"विश्वासार्हता: {confidence_pct} टक्के. "
+            f"{recommendation_mr}"
+        )
+    else:
+        message = (
+            f"निदान: तुमच्या झाडाला {disease_mr} झाला आहे. "
+            f"विश्वासार्हता: {confidence_pct} टक्के. "
+            f"उपचार न केल्यास अंदाजे {loss_low} ते {loss_high} टक्के उत्पादन कमी होऊ शकते. "
+            f"सल्ला: {recommendation_mr} "
+            f"{DISCLAIMER_MARATHI}"
+        )
 
-    return green_ratio >= GREEN_PIXEL_THRESHOLD
-
-
-@app.route("/diagnose", methods=["POST"])
-def diagnose():
-    if "photo" not in request.files:
-        return jsonify({"error": "No photo uploaded"}), 400
-
-    file = request.files["photo"]
-    unique_id = uuid.uuid4().hex[:8]
-    upload_path = os.path.join(UPLOAD_FOLDER, f"{unique_id}.jpg")
-    file.save(upload_path)
-
-    # --- Pre-check: does this even look like a plant leaf? ---
-    if not looks_like_a_leaf(upload_path):
-        return jsonify({
-            "predicted_class": None,
-            "confidence": 0,
-            "not_a_leaf": True,
-            "marathi_message": NOT_A_LEAF_MESSAGE_MARATHI,
-        })
-
-    # Load and preprocess image
-    img = tf.keras.preprocessing.image.load_img(upload_path, target_size=IMG_SIZE)
-    img_array = tf.keras.preprocessing.image.img_to_array(img) / 255.0
-    img_array = np.expand_dims(img_array, axis=0)
-
-    # Predict + Grad-CAM
-    heatmap, pred_index, all_probs = make_gradcam_heatmap(img_array)
-    predicted_class = CLASS_NAMES[pred_index]
-    confidence = float(all_probs[pred_index])
-
-    # --- Post-check: is the model actually confident? ---
-    if confidence < CONFIDENCE_THRESHOLD:
-        return jsonify({
-            "predicted_class": None,
-            "confidence": round(confidence * 100, 2),
-            "not_a_leaf": True,
-            "marathi_message": NOT_A_LEAF_MESSAGE_MARATHI,
-        })
-
-    loss_low, loss_high = YIELD_LOSS_TABLE[predicted_class]
-
-    heatmap_path = os.path.join(RESULT_FOLDER, f"{unique_id}_heatmap.jpg")
-    overlay_gradcam(upload_path, heatmap, heatmap_path)
-
-    # Marathi text + audio
-    marathi_message = build_marathi_message(predicted_class, confidence, (loss_low, loss_high))
-    audio_path = os.path.join(RESULT_FOLDER, f"{unique_id}_audio.mp3")
-    speak_marathi(marathi_message, save_path=audio_path)
-
-    return jsonify({
-        "predicted_class": predicted_class,
-        "confidence": round(confidence * 100, 2),
-        "yield_loss_range": [loss_low, loss_high],
-        "marathi_message": marathi_message,
-        "heatmap_url": "/" + heatmap_path.replace("\\", "/"),
-        "audio_url": "/" + audio_path.replace("\\", "/"),
-    })
+    return message
 
 
+def speak_marathi(message, save_path="diagnosis_audio_marathi.mp3", timeout_seconds=10):
+    """Generate Marathi audio via gTTS, bounded by a hard timeout.
+
+    gTTS calls an external Google endpoint with no built-in timeout of
+    its own. On some cloud hosts (e.g. Render's datacenter IPs), that
+    call can hang indefinitely instead of failing quickly, which — left
+    unbounded — eventually triggers gunicorn's own worker timeout and
+    kills the whole request, truncating the response the browser was
+    waiting on. Bounding it here means a slow/blocked TTS call fails
+    fast and the rest of the diagnosis (text, heatmap) still returns
+    successfully, just without audio.
+    """
+    def _generate():
+        tts = gTTS(text=message, lang="mr")
+        tts.save(save_path)
+        return save_path
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_generate)
+            result = future.result(timeout=timeout_seconds)
+            print(f"Audio saved to {save_path}")
+            return result
+    except concurrent.futures.TimeoutError:
+        print(f"gTTS call exceeded {timeout_seconds}s and was abandoned (likely blocked/slow on this host).")
+        print("Continuing without audio — text result is still available.")
+        return None
+    except Exception as e:
+        print(f"Could not generate audio: {e}")
+        print("Text result is still available below.")
+        return None
+
+
+# ----------------------------------------------------------------------
+# COMBINED PIPELINE — call this after diagnose_leaf() from
+# gradcam_explainability.py
+# ----------------------------------------------------------------------
+def communicate_result(predicted_class, confidence, yield_loss_range, speak=True):
+    message = build_marathi_message(predicted_class, confidence, yield_loss_range)
+
+    print("\n=== शेतकऱ्यांसाठी संदेश (Farmer Message - Marathi) ===")
+    print(message)
+
+    if speak:
+        speak_marathi(message)
+
+    return message
+
+
+# ----------------------------------------------------------------------
+# EXAMPLE USAGE (standalone test, without running the full model)
+# ----------------------------------------------------------------------
 if __name__ == "__main__":
-    # For local testing only. In production (Render), gunicorn runs the
-    # app instead of this block — see Procfile.
-    port = int(os.environ.get("PORT", 5000))
-    debug_mode = os.environ.get("FLASK_DEBUG", "false").lower() == "true"
-    app.run(host="0.0.0.0", port=port, debug=debug_mode)
+    # Example: simulate a diagnosis result
+    example_result = communicate_result(
+        predicted_class="Early_blight",
+        confidence=0.94,
+        yield_loss_range=(20, 50),
+        speak=True,
+    )
