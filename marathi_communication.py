@@ -15,6 +15,7 @@ the Marathi text instead.
 
 from gtts import gTTS
 import os
+import concurrent.futures
 
 # ----------------------------------------------------------------------
 # MARATHI TRANSLATIONS — pre-written by disease class (not machine
@@ -98,14 +99,35 @@ def build_marathi_message(predicted_class, confidence, yield_loss_range):
     return message
 
 
-def speak_marathi(message, save_path="diagnosis_audio_marathi.mp3"):
-    try:
+def speak_marathi(message, save_path="diagnosis_audio_marathi.mp3", timeout_seconds=10):
+    """Generate Marathi audio via gTTS, bounded by a hard timeout.
+
+    gTTS calls an external Google endpoint with no built-in timeout of
+    its own. On some cloud hosts (e.g. Render's datacenter IPs), that
+    call can hang indefinitely instead of failing quickly, which — left
+    unbounded — eventually triggers gunicorn's own worker timeout and
+    kills the whole request, truncating the response the browser was
+    waiting on. Bounding it here means a slow/blocked TTS call fails
+    fast and the rest of the diagnosis (text, heatmap) still returns
+    successfully, just without audio.
+    """
+    def _generate():
         tts = gTTS(text=message, lang="mr")
         tts.save(save_path)
-        print(f"Audio saved to {save_path}")
         return save_path
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_generate)
+            result = future.result(timeout=timeout_seconds)
+            print(f"Audio saved to {save_path}")
+            return result
+    except concurrent.futures.TimeoutError:
+        print(f"gTTS call exceeded {timeout_seconds}s and was abandoned (likely blocked/slow on this host).")
+        print("Continuing without audio — text result is still available.")
+        return None
     except Exception as e:
-        print(f"Could not generate audio (likely no internet connection): {e}")
+        print(f"Could not generate audio: {e}")
         print("Text result is still available below.")
         return None
 
